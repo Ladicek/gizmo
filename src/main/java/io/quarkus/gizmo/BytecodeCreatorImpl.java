@@ -16,11 +16,18 @@
 
 package io.quarkus.gizmo;
 
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 
+import java.io.Serializable;
+import java.lang.invoke.CallSite;
+import java.lang.invoke.LambdaMetafactory;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -1096,11 +1103,11 @@ class BytecodeCreatorImpl implements BytecodeCreator {
         return resultHandle;
     }
 
-    @Override
-    public FunctionCreator createFunction(Class<?> functionalInterface) {
+    private Method findSingleAbstractMethod(Class<?> functionalInterface) {
         if (!functionalInterface.isInterface()) {
             throw new IllegalArgumentException("Not an interface " + functionalInterface);
         }
+
         Method functionMethod = null;
         for (Method m : functionalInterface.getMethods()) {
             if (m.isDefault() || Modifier.isStatic(m.getModifiers())) {
@@ -1112,10 +1119,16 @@ class BytecodeCreatorImpl implements BytecodeCreator {
                 functionMethod = m;
             }
         }
+
         if (functionMethod == null) {
             throw new IllegalArgumentException("Could not find function method " + functionalInterface);
         }
+        return functionMethod;
+    }
 
+    @Override
+    public FunctionCreator createFunction(Class<?> functionalInterface) {
+        Method functionMethod = findSingleAbstractMethod(functionalInterface);
 
         final String declaringClassName = getMethod().getDeclaringClassName();
         final AtomicInteger counter = functionCountersByClass.computeIfAbsent(declaringClassName, k -> new AtomicInteger());
@@ -1150,6 +1163,120 @@ class BytecodeCreatorImpl implements BytecodeCreator {
             @Override
             public void findResultHandles(Set<ResultHandle> vc) {
                 vc.addAll(fc.getCapturedResultHandles());
+            }
+        });
+        return fc;
+    }
+
+    @Override
+    public FunctionCreator createLambda(Class<?> functionalInterface) {
+        if (Serializable.class.isAssignableFrom(functionalInterface)) {
+            throw new IllegalArgumentException("Serializable lambdas not supported: " + functionalInterface);
+        }
+        Method samMethod = findSingleAbstractMethod(functionalInterface);
+
+        String declaringClassName = getMethod().getDeclaringClassName();
+        AtomicInteger counter = functionCountersByClass.computeIfAbsent(declaringClassName, ignored -> new AtomicInteger());
+
+        String lambdaMethodName = "lambda$" + getMethod().getMethodDescriptor().getName() + "$" + counter.incrementAndGet();
+        // TODO captured variables would correspond to parameters of the lambda method
+        MethodCreator lambdaMethod = getMethod().getClassCreator().getMethodCreator(lambdaMethodName,
+                samMethod.getReturnType(), samMethod.getParameterTypes());
+        boolean isStatic = Modifier.isStatic(getMethod().getModifiers());
+        if (isStatic) {
+            lambdaMethod.setModifiers(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_STATIC);
+        } else {
+            lambdaMethod.setModifiers(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC);
+        }
+
+        ResultHandle lambdaInstance = new ResultHandle("L" + functionalInterface.getName().replace('.', '/') + ";", this);
+
+        FunctionCreator fc = new FunctionCreator() {
+            @Override
+            public ResultHandle getInstance() {
+                return lambdaInstance;
+            }
+
+            @Override
+            public BytecodeCreator getBytecode() {
+                return lambdaMethod;
+            }
+        };
+
+        operations.add(new Operation() {
+            @Override
+            public void writeBytecode(MethodVisitor methodVisitor) {
+                Type samMethodType = Type.getType(samMethod);
+
+                String lambdaMethodDescriptor = lambdaMethod.getMethodDescriptor().getDescriptor();
+                Handle lambdaMethodHandle = new Handle(Opcodes.H_INVOKESPECIAL, declaringClassName, lambdaMethodName,
+                        lambdaMethodDescriptor, false);
+
+                // see signature of LambdaMetafactory.metafactory()
+                MethodDescriptor lambdaMetafactoryDescriptor = MethodDescriptor.ofMethod(
+                        LambdaMetafactory.class, "metafactory",
+                        // return type
+                        CallSite.class,
+                        // parameter types
+                        MethodHandles.Lookup.class,
+                        String.class,
+                        MethodType.class,
+                        MethodType.class,
+                        MethodHandle.class,
+                        MethodType.class);
+                Handle lambdaMetafactoryHandle = new Handle(Opcodes.H_INVOKESTATIC,
+                        lambdaMetafactoryDescriptor.getDeclaringClass(), lambdaMetafactoryDescriptor.getName(),
+                        lambdaMetafactoryDescriptor.getDescriptor(), false);
+                // 3rd element could be specialized (for runtime type checks)
+                Object[] lambdaMetafactoryArguments = {samMethodType, lambdaMethodHandle, samMethodType};
+
+                // see the 2nd and 3rd parameter of LambdaMetafactory.metafactory()
+                String targetName = samMethod.getName();
+                String targetDescriptor;
+                if (isStatic) {
+                    targetDescriptor = Type.getMethodDescriptor(
+                            // return type
+                            Type.getType(functionalInterface)
+                            // parameter types (the lambda method is static, no need to add the receiver)
+                            // TODO types of captured variables would be here
+                    );
+                } else {
+                    targetDescriptor = Type.getMethodDescriptor(
+                            // return type
+                            Type.getType(functionalInterface),
+                            // parameter types (the lambda method is _not_ static, first parameter must be the receiver)
+                            Type.getType(DescriptorUtils.objectToDescriptor(declaringClassName))
+                            // TODO types of captured variables would be here
+                    );
+                }
+
+                if (!isStatic) {
+                    loadResultHandle(methodVisitor, getMethod().getThis(), BytecodeCreatorImpl.this,
+                            "L" + declaringClassName + ";", true /*TODO*/);
+                }
+                // TODO load captured variables here
+                methodVisitor.visitInvokeDynamicInsn(targetName, targetDescriptor, lambdaMetafactoryHandle, lambdaMetafactoryArguments);
+                storeResultHandle(methodVisitor, lambdaInstance);
+            }
+
+            @Override
+            Set<ResultHandle> getInputResultHandles() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            ResultHandle getTopResultHandle() {
+                return null;
+            }
+
+            @Override
+            ResultHandle getOutgoingResultHandle() {
+                return lambdaInstance;
+            }
+
+            @Override
+            public void findResultHandles(Set<ResultHandle> vc) {
+                // TODO capturing not yet supported
             }
         });
         return fc;

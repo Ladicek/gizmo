@@ -795,6 +795,21 @@ public interface BytecodeCreator extends AutoCloseable {
     FunctionCreator createFunction(Class<?> functionalInterface);
 
     /**
+     * WARNING: this API is EXPERIMENTAL. It may be removed at any time without prior notice.
+     * Use {@link #createFunction(Class)} until this API is stabilized.
+     * <p>
+     * Creates an instance of a functional interface as a lambda expression. Capturing variables
+     * from lexical scope is not supported. Serializable lambdas are not supported.
+     * <p>
+     * The resulting {@link FunctionCreator} can be used to both define the functions
+     * bytecode, and to get a {@link ResultHandle} that represents the instance of the function.
+     *
+     * @param functionalInterface A functional interface
+     * @return The function builder
+     */
+    FunctionCreator createLambda(Class<?> functionalInterface);
+
+    /**
      * Represents a return statement. If this is a void method the return value must be null, otherwise it must be a
      * {@link ResultHandle} of the correct type which will be returned from the method.
      *
