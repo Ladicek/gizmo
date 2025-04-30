@@ -854,7 +854,7 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
             input = VoidConst.INSTANCE;
         }
         handler.accept(this, input);
-        cleanStack(tail.apply(Item::verify));
+        cleanStack(tail.item().process(tail, Item::verify));
         markDone();
     }
 
@@ -875,7 +875,7 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
                 }
             }
         }
-        cleanStack(tail.apply(Item::verify));
+        cleanStack(tail.item().process(tail, Item::verify));
         markDone();
     }
 
