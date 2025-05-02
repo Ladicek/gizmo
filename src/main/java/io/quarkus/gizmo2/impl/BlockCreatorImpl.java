@@ -710,7 +710,9 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         Node dupNode = dup_.insert(node.next());
         new_.insert(dupNode);
         // finally, add the invoke at tail
-        addItem(new Invoke(ctor, dup_, args));
+        Invoke invokeItem = new Invoke(ctor, dup_, args);
+        new_.setInvokeItem(invokeItem);
+        addItem(invokeItem);
         // the New is all that is left on the stack now
         return new_;
     }
