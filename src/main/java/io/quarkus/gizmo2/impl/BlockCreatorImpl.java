@@ -16,6 +16,7 @@ import java.lang.constant.MethodTypeDesc;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -209,6 +210,54 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         return this == other || parent != null && parent.isContainedBy(other);
     }
 
+    private List<? extends Expr> convert(List<? extends Expr> exprs, List<ClassDesc> toTypes) {
+        assert exprs.size() == toTypes.size();
+        List<Expr> result = new ArrayList<>();
+        for (int i = 0; i < exprs.size(); i++) {
+            result.add(convert(exprs.get(i), toTypes.get(i)));
+        }
+        return result;
+    }
+
+    private Expr convert(Expr expr, ClassDesc toType) throws IllegalStateException {
+        if (expr == null || toType == null) {
+            return expr;
+        }
+
+        if (expr.type().isPrimitive() && toType.isClassOrInterface()) {
+            // box
+            ClassDesc unboxType = expr.type();
+            ClassDesc boxType = AutoConversions.boxTypes.get(unboxType);
+            ClassMethodDesc boxMethod = ClassMethodDesc.of(boxType, "valueOf", MethodTypeDesc.of(boxType, unboxType));
+            return addItem(new Invoke(Opcode.INVOKESTATIC, boxMethod, null, List.of(expr)));
+        } else if (expr.type().isClassOrInterface() && toType.isPrimitive()) {
+            // unbox
+            ClassDesc boxType = expr.type();
+            ClassDesc unboxType = AutoConversions.unboxTypes.get(boxType);
+            if (unboxType != null) {
+                ClassMethodDesc unboxMethod = ClassMethodDesc.of(boxType, switch (TypeKind.from(unboxType)) {
+                    case BOOLEAN -> "booleanValue";
+                    case BYTE -> "byteValue";
+                    case CHAR -> "charValue";
+                    case SHORT -> "shortValue";
+                    case INT -> "intValue";
+                    case LONG -> "longValue";
+                    case FLOAT -> "floatValue";
+                    case DOUBLE -> "doubleValue";
+                    default -> throw impossibleSwitchCase(TypeKind.from(unboxType));
+                }, MethodTypeDesc.of(unboxType));
+                return addItem(new Invoke(Opcode.INVOKEVIRTUAL, unboxMethod, expr, List.of()));
+            }
+        } else if (expr.type().isPrimitive() && toType.isPrimitive() && !expr.type().equals(toType)) {
+            // widen
+            Set<ClassDesc> widerTypes = AutoConversions.wideningConversions.get(expr.type());
+            if (widerTypes.contains(toType)) {
+                return addItem(new PrimitiveCast(expr, toType));
+            }
+        }
+        return expr;
+    }
+
     public LocalVar declare(final String name, final ClassDesc type) {
         LocalVarImpl lv = new LocalVarImpl(this, name, type);
         addItem(lv.allocator());
@@ -219,59 +268,73 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         return addItem(((AssignableImpl) var).emitGet(this, mode));
     }
 
-    public void set(final Assignable var, final Expr value, final MemoryOrder mode) {
+    public void set(final Assignable var, Expr value, final MemoryOrder mode) {
+        value = convert(value, var.type());
         addItem(((AssignableImpl) var).emitSet(this, (Item) value, mode));
     }
 
     public void andAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, and(var, arg));
     }
 
     public void orAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, or(var, arg));
     }
 
     public void xorAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, xor(var, arg));
     }
 
     public void shlAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, shl(var, arg));
     }
 
     public void shrAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, shr(var, arg));
     }
 
     public void ushrAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, ushr(var, arg));
     }
 
     public void addAssign(final Assignable var, final Expr arg) {
         if (arg instanceof Const c) {
+            // TODO auto-conversions?
             inc(var, c);
         } else {
+            // auto-conversion handled in `set()`
             set(var, add(var, arg));
         }
     }
 
     public void subAssign(final Assignable var, final Expr arg) {
         if (arg instanceof Const c) {
+            // TODO auto-conversions?
             dec(var, c);
         } else {
+            // auto-conversion handled in `set()`
             set(var, sub(var, arg));
         }
     }
 
     public void mulAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, mul(var, arg));
     }
 
     public void divAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, div(var, arg));
     }
 
     public void remAssign(final Assignable var, final Expr arg) {
+        // auto-conversion handled in `set()`
         set(var, rem(var, arg));
     }
 
@@ -425,10 +488,11 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         }
     }
 
-    public Expr newArray(final ClassDesc componentType, final List<? extends Expr> values) {
+    public Expr newArray(final ClassDesc componentType, List<? extends Expr> values) {
         checkActive();
         // build the object graph
         int size = values.size();
+        values = convert(values, Collections.nCopies(size, componentType));
         List<ArrayStore> stores = new ArrayList<>(size);
         NewEmptyArray nea = new NewEmptyArray(componentType, ConstImpl.of(size));
         for (int i = 0; i < size; i++) {
@@ -526,16 +590,32 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         return addItem(new Cmp(a, b, Cmp.Kind.CMPG));
     }
 
+    private Expr binOp(Expr a, Expr b, BinOp.Kind kind) {
+        switch (kind.operands) {
+            case SAME -> {
+                ClassDesc type = AutoConversions.widerType(a.type(), b.type());
+                a = convert(a, type);
+                b = convert(b, type);
+            }
+            case SECOND_INT -> {
+                a = convert(a, AutoConversions.unboxTypes.get(a.type()));
+                b = convert(b, CD_int);
+            }
+            default -> throw impossibleSwitchCase(kind.operands);
+        }
+        return addItem(new BinOp(a, b, kind));
+    }
+
     public Expr and(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.AND));
+        return binOp(a, b, BinOp.Kind.AND);
     }
 
     public Expr or(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.OR));
+        return binOp(a, b, BinOp.Kind.OR);
     }
 
     public Expr xor(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.XOR));
+        return binOp(a, b, BinOp.Kind.XOR);
     }
 
     public Expr complement(final Expr a) {
@@ -543,41 +623,42 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
     }
 
     public Expr shl(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.SHL));
+        return binOp(a, b, BinOp.Kind.SHL);
     }
 
     public Expr shr(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.SHR));
+        return binOp(a, b, BinOp.Kind.SHR);
     }
 
     public Expr ushr(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.USHR));
+        return binOp(a, b, BinOp.Kind.USHR);
     }
 
     public Expr add(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.ADD));
+        return binOp(a, b, BinOp.Kind.ADD);
     }
 
     public Expr sub(final Expr a, final Expr b) {
         if (a instanceof ConstImpl c && c.isZero()) {
             return neg(b);
         }
-        return addItem(new BinOp(a, b, BinOp.Kind.SUB));
+        return binOp(a, b, BinOp.Kind.SUB);
     }
 
     public Expr mul(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.MUL));
+        return binOp(a, b, BinOp.Kind.MUL);
     }
 
     public Expr div(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.DIV));
+        return binOp(a, b, BinOp.Kind.DIV);
     }
 
     public Expr rem(final Expr a, final Expr b) {
-        return addItem(new BinOp(a, b, BinOp.Kind.REM));
+        return binOp(a, b, BinOp.Kind.REM);
     }
 
-    public Expr neg(final Expr a) {
+    public Expr neg(Expr a) {
+        a = convert(a, AutoConversions.unboxTypes.get(a.type()));
         return addItem(new Neg(a));
     }
 
@@ -695,10 +776,18 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         return addItem(new InstanceOf(obj, type));
     }
 
-    public Expr new_(final ConstructorDesc ctor, final List<? extends Expr> args) {
+    public Expr new_(final ConstructorDesc ctor, List<? extends Expr> args) {
+        MethodTypeDesc type = ctor.type();
+        if (type.parameterCount() != args.size()) {
+            String paramsStr = type.parameterCount() == 1 ? "1 parameter" : type.parameterCount() + " parameters";
+            String argsStr = args.size() == 1 ? "1 argument was" : args.size() + " arguments were";
+            throw new IllegalArgumentException("Constructor of " + ctor.owner().displayName() + " takes "
+                    + paramsStr + ", but " + argsStr + " passed");
+        }
         checkActive();
         New new_ = new New(ctor.owner());
         Dup dup_ = new Dup(new_);
+        args = convert(args, type.parameterList());
         Node node = tail.prev();
         // insert New & Dup *before* the arguments
         for (int i = args.size() - 1; i >= 0; i--) {
@@ -718,18 +807,19 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
     }
 
     public Expr invokeStatic(final MethodDesc method, final List<? extends Expr> args) {
-        return addItem(new Invoke(Opcode.INVOKESTATIC, method, null, args));
+        return invoke(Opcode.INVOKESTATIC, method, null, args);
     }
 
     public Expr invokeVirtual(final MethodDesc method, final Expr instance, final List<? extends Expr> args) {
-        return addItem(new Invoke(Opcode.INVOKEVIRTUAL, method, instance, args));
+        return invoke(Opcode.INVOKEVIRTUAL, method, instance, args);
     }
 
     public Expr invokeSpecial(final MethodDesc method, final Expr instance, final List<? extends Expr> args) {
-        return addItem(new Invoke(Opcode.INVOKESPECIAL, method, instance, args));
+        return invoke(Opcode.INVOKESPECIAL, method, instance, args);
     }
 
     public Expr invokeSpecial(final ConstructorDesc ctor, final Expr instance, final List<? extends Expr> args) {
+        // TODO
         Invoke invoke = new Invoke(ctor, instance, args);
         addItem(invoke);
         if (instance instanceof ThisExpr) {
@@ -745,7 +835,28 @@ public final class BlockCreatorImpl extends Item implements BlockCreator {
         if (!(method instanceof InterfaceMethodDesc)) {
             throw new IllegalArgumentException("Cannot emit `invokeinterface` for " + method + "; must be InterfaceMethodDesc");
         }
-        return addItem(new Invoke(Opcode.INVOKEINTERFACE, method, instance, args));
+        return invoke(Opcode.INVOKEINTERFACE, method, instance, args);
+    }
+
+    private Expr invoke(Opcode opcode, MethodDesc method, Expr instance, List<? extends Expr> args) {
+        if (method.parameterCount() != args.size()) {
+            String paramsStr = method.parameterCount() == 1 ? "1 parameter" : method.parameterCount() + " parameters";
+            String argsStr = args.size() == 1 ? "1 argument was" : args.size() + " arguments were";
+            throw new IllegalArgumentException("Method " + method.owner().displayName() + "." + method.name()
+                    + "() takes " + paramsStr + ", but " + argsStr + " passed");
+        }
+        instance = convert(instance, method.owner());
+        args = convert(args, method.parameterList());
+        for (int i = 0; i < method.parameterCount(); i++) {
+            ClassDesc parameterType = method.parameterType(i);
+            ClassDesc argumentType = args.get(i).type();
+            if (TypeKind.from(parameterType).asLoadable() != TypeKind.from(argumentType).asLoadable()) {
+                throw new IllegalArgumentException("Parameter " + i + " of method " + method.owner().displayName()
+                        + "." + method.name() + "() is of type '" + parameterType.displayName()
+                        + "', but given argument is '" + argumentType.displayName() + "'");
+            }
+        }
+        return addItem(new Invoke(opcode, method, instance, args));
     }
 
     public Expr invokeDynamic(final DynamicCallSiteDesc callSiteDesc, final List<? extends Expr> args) {

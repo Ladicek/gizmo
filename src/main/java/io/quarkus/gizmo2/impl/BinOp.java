@@ -15,7 +15,6 @@ final class BinOp extends Item {
     private final Kind kind;
 
     BinOp(final Expr a, final Expr b, final Kind kind) {
-        // todo: automatic conversions, unboxing
         switch (kind.operands) {
             case SAME -> requireSameLoadableTypeKind(a, b);
             case SECOND_INT -> {
