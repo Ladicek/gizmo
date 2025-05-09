@@ -111,7 +111,7 @@ public abstract non-sealed class Item implements Expr {
      * @return the node before the first dependency of this node (not {@code null})
      */
     protected Node insertIfUnbound(Node node) {
-        if (!bound()) {
+        if (!bound() /* && node.item() != this */) {
             return forEachDependency(node.insertNext(this), Item::insertIfUnbound);
         } else {
             return verify(node);
@@ -207,14 +207,14 @@ public abstract non-sealed class Item implements Expr {
 
     public Assignable elem(final Expr index) {
         if (!type().isArray()) {
-            throw new IllegalArgumentException("Value type is not array");
+            throw new IllegalArgumentException("Value type is not array: " + type().displayName());
         }
         return new ArrayDeref(type().componentType(), index);
     }
 
     public Expr length() {
         if (!type().isArray()) {
-            throw new IllegalArgumentException("Length is only allowed on arrays (expression type is actually " + type() + ")");
+            throw new IllegalArgumentException("Value type is not array: " + type().displayName());
         }
         return new Item() {
             @Override
